@@ -246,7 +246,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
 
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=416, batch_size=16, augment=False, hyp=None, rect=True, image_weights=False,
-                 cache_images=False):
+                 cache_labels=False, cache_images=False):
         path = str(Path(path))  # os-agnostic
         with open(path, 'r') as f:
             self.img_files = [x.replace('/', os.sep) for x in f.read().splitlines()  # os-agnostic
@@ -305,7 +305,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         # Preload labels (required for weighted CE training)
         self.imgs = [None] * n
         self.labels = [None] * n
-        if augment or image_weights:  # cache labels for faster training
+        if cache_labels or image_weights:  # cache labels for faster training
             self.labels = [np.zeros((0, 5))] * n
             extract_bounding_boxes = False
             pbar = tqdm(self.label_files, desc='Reading labels')
@@ -334,7 +334,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                             f = '%s%sclassifier%s%g_%g_%s' % (p.parent.parent, os.sep, os.sep, x[0], j, p.name)
                             if not os.path.exists(Path(f).parent):
                                 os.makedirs(Path(f).parent)  # make new output folder
-                            box = xywh2xyxy(x[1:].reshape(-1, 4)).ravel()
+                            box = xywh2xyxy(x[1:].reshape(-1, 4) * np.array([1, 1, 1.5, 1.5])).ravel()
                             b = np.clip(box, 0, 1)  # clip boxes outside of image
                             ret_val = cv2.imwrite(f, img[int(b[1] * h):int(b[3] * h), int(b[0] * w):int(b[2] * w)])
                             assert ret_val, 'Failure extracting classifier boxes'

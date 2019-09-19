@@ -20,7 +20,7 @@ def test(cfg,
          model=None):
     # Initialize/load model and set device
     if model is None:
-        device = torch_utils.select_device()
+        device = torch_utils.select_device(opt.device)
         verbose = True
 
         # Initialize model
@@ -48,7 +48,7 @@ def test(cfg,
     dataset = LoadImagesAndLabels(test_path, img_size, batch_size)
     dataloader = DataLoader(dataset,
                             batch_size=batch_size,
-                            num_workers=min(os.cpu_count(), batch_size),
+                            num_workers=min([os.cpu_count(), batch_size, 16]),
                             pin_memory=True,
                             collate_fn=dataset.collate_fn)
 
@@ -204,6 +204,7 @@ if __name__ == '__main__':
     parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
     parser.add_argument('--nms-thres', type=float, default=0.5, help='iou threshold for non-maximum suppression')
     parser.add_argument('--save-json', action='store_true', help='save a cocoapi-compatible JSON results file')
+    parser.add_argument('--device', default='', help='device id (i.e. 0 or 0,1) or cpu')
     opt = parser.parse_args()
     print(opt)
 
