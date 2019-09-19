@@ -9,29 +9,35 @@ ONNX_EXPORT = False
 
 def create_modules(module_defs, img_size, arc):
     # Constructs module list of layer blocks from module configuration in module_defs
-
-    hyperparams = module_defs.pop(0)
-    output_filters = [int(hyperparams['channels'])]
-    module_list = nn.ModuleList()
-    routs = []  # list of layers which rout to deeper layes
+    hyperparams = module_defs.pop(0)  # blocks[0]存储了cfg中[net]的信息，它是一个字典，获取网络输入和预处理相关信息
+    # 初始值对应于输入数据3通道，用来存储我们需要持续追踪被应用卷积层的卷积核数量（上一层的卷积核数量（或特征图深度））
+    # 我们不仅需要追踪前一层的卷积核数量，还需要追踪之前每个层。随着不断地迭代，我们将每个模块的输出卷积核数量添加到output_filters列表上。
+    output_filters = [int(hyperparams['channels'])] 
+    module_list = nn.ModuleList() # module_list用于存储每个block,每个block对应cfg文件中一个块，类似[convolutional]里面就对应一个卷积块
+    routs = []                    # list of layers which rout to deeper layes
     yolo_index = -1
 
+    # 这里，我们迭代block[1:] 而不是blocks，因为blocks的第一个元素是一个net块，它不属于前向传播。
     for i, mdef in enumerate(module_defs):
-        modules = nn.Sequential()
+        modules = nn.Sequential() # 这里每个块用nn.sequential()创建为了一个module,一个module有多个层
 
+        
         if mdef['type'] == 'convolutional':
-            bn = int(mdef['batch_normalize'])
-            filters = int(mdef['filters'])
-            kernel_size = int(mdef['size'])
-            pad = (kernel_size - 1) // 2 if int(mdef['pad']) else 0
+            """ 1. 卷积层 """
+            bn = int(mdef['batch_normalize'])   # 卷积层后是否有BN层
+            filters = int(mdef['filters'])      # 卷积核个数
+            kernel_size = int(mdef['size'])     # 卷积核大小
+            pad = (kernel_size - 1) // 2 if int(mdef['pad']) else 0 
             modules.add_module('Conv2d', nn.Conv2d(in_channels=output_filters[-1],
                                                    out_channels=filters,
                                                    kernel_size=kernel_size,
                                                    stride=int(mdef['stride']),
                                                    padding=pad,
-                                                   bias=not bn))
+                                                   bias=not bn)) #卷积层后接BN就不需要bias, 卷积层后无BN层就需要bias
+            # 添加BN层
             if bn:
                 modules.add_module('BatchNorm2d', nn.BatchNorm2d(filters, momentum=0.1))
+            # 添加激活函数层
             if mdef['activation'] == 'leaky':  # TODO: activation study https://github.com/ultralytics/yolov3/issues/441
                 modules.add_module('activation', nn.LeakyReLU(0.1, inplace=True))
                 # modules.add_module('activation', nn.PReLU(num_parameters=1, init=0.10))
@@ -48,11 +54,23 @@ def create_modules(module_defs, img_size, arc):
                 modules = maxpool
 
         elif mdef['type'] == 'upsample':
+            """
+            2. upsampling layer
+            没有使用 Bilinear2dUpsampling，实际使用的为最近邻插值
+            """
             modules = nn.Upsample(scale_factor=int(mdef['stride']), mode='nearest')
 
         elif mdef['type'] == 'route':  # nn.Sequential() placeholder for 'route' layer
+            """
+            route layer -> Empty layer
+            route层的作用：当layer取值为正时，输出这个正数对应的层的特征，如果layer取值为负数，输出route层向后退layer层对应层的特征
+            route层具有一个layers属性，它可以具有一个或两个值。
+            当layers属性只有一个值时，它会输出由该值索引的层的特征图。在我们的示例中，它是-4，因此该层将输出位于Route层前面的第4层的特征图。
+            当层有两个值时，它会返回由其值所索引的层的特征图的连接。在我们的例子中，它是-1,61，该层输出来自前一层（-1）和第61层的特征图，它们沿着深度维度进行连接。
+            """
             layers = [int(x) for x in mdef['layers'].split(',')]
-            filters = sum([output_filters[i + 1 if i > 0 else i] for i in layers])
+            # 疑问：为什么是i + 1？
+            filters = sum([output_filters[i + 1 if i > 0 else i] for i in layers]) # 卷积核数目为两层的加和
             routs.extend([l if l > 0 else l + i for l in layers])
             # if mdef[i+1]['type'] == 'reorg3d':
             #     modules = nn.Upsample(scale_factor=1/float(mdef[i+1]['stride']), mode='nearest')  # reorg3d
@@ -61,12 +79,12 @@ def create_modules(module_defs, img_size, arc):
             filters = output_filters[int(mdef['from'])]
             layer = int(mdef['from'])
             routs.extend([i + layer if layer < 0 else layer])
-
+            
         elif mdef['type'] == 'reorg3d':  # yolov3-spp-pan-scale
             # torch.Size([16, 128, 104, 104])
             # torch.Size([16, 64, 208, 208]) <-- # stride 2 interpolate dimensions 2 and 3 to cat with prior layer
             pass
-
+        
         elif mdef['type'] == 'yolo':
             yolo_index += 1
             mask = [int(x) for x in mdef['mask'].split(',')]  # anchor mask
@@ -126,25 +144,28 @@ class YOLOLayer(nn.Module):
 
         self.anchors = torch.Tensor(anchors)
         self.na = len(anchors)  # number of anchors (3)
-        self.nc = nc  # number of classes (80)
-        self.nx = 0  # initialize number of x gridpoints
-        self.ny = 0  # initialize number of y gridpoints
+        self.nc = nc            # number of classes (80)
+        self.nx = 0             # initialize number of x gridpoints
+        self.ny = 0             # initialize number of y gridpoints
         self.arc = arc
-
+        
         if ONNX_EXPORT:  # grids must be computed in __init__
             stride = [32, 16, 8][yolo_index]  # stride of this layer
-            nx = int(img_size[1] / stride)  # number x grid points
-            ny = int(img_size[0] / stride)  # number y grid points
+            nx = int(img_size[1] / stride)    # number x grid points
+            ny = int(img_size[0] / stride)    # number y grid points
             create_grids(self, img_size, (nx, ny))
 
-    def forward(self, p, img_size, var=None):
-        if ONNX_EXPORT:
+    def forward(self, p, img_size, var=None): # p为传入的预测值，torch.Size([bs, 255, 13, 13])
+        if ONNX_EXPORT:                       
             bs = 1  # batch size
         else:
             bs, ny, nx = p.shape[0], p.shape[-2], p.shape[-1]
             if (self.nx, self.ny) != (nx, ny):
                 create_grids(self, img_size, (nx, ny), p.device, p.dtype)
 
+        # 把255的列向量信息，加一个维度分开成3个box
+        # p的shape为：torch.Size([1, 3, 13, 13, 85]) ，(bs, anchors, grid, grid, xywh+conf+class)
+        # 注意，当前YOLO层分配了3个anchor
         # p.view(bs, 255, 13, 13) -- > (bs, 3, 13, 13, 85)  # (bs, anchors, grid, grid, classes + xywh)
         p = p.view(bs, self.na, self.nc + 5, self.ny, self.nx).permute(0, 1, 3, 4, 2).contiguous()  # prediction
 
@@ -216,20 +237,22 @@ class Darknet(nn.Module):
 
     def forward(self, x, var=None):
         img_size = x.shape[-2:]
-        layer_outputs = []
-        output = []
+        layer_outputs = []    # 存储self.routs中对应层的输出
+        output = []           # 存储YOLO层的检测输出
 
         for i, (mdef, module) in enumerate(zip(self.module_defs, self.module_list)):
             mtype = mdef['type']
             if mtype in ['convolutional', 'upsample', 'maxpool']:
-                x = module(x)
+                x = module(x)    # 计算前向输出
             elif mtype == 'route':
                 layers = [int(x) for x in mdef['layers'].split(',')]
                 if len(layers) == 1:
+                    # 当layers属性只有一个值时，输出由该值索引的层的特征图
                     x = layer_outputs[layers[0]]
                 else:
+                   # 当层有两个值时，它会返回由其值所索引的层的特征图的连接
                     try:
-                        x = torch.cat([layer_outputs[i] for i in layers], 1)
+                        x = torch.cat([layer_outputs[i] for i in layers], 1) #按第一维度融合
                     except:  # apply stride 2 for darknet reorg layer
                         layer_outputs[layers[1]] = F.interpolate(layer_outputs[layers[1]], scale_factor=[0.5, 0.5])
                         x = torch.cat([layer_outputs[i] for i in layers], 1)
@@ -237,10 +260,10 @@ class Darknet(nn.Module):
             elif mtype == 'shortcut':
                 x = x + layer_outputs[int(mdef['from'])]
             elif mtype == 'yolo':
-                x = module(x, img_size)
-                output.append(x)
-            layer_outputs.append(x if i in self.routs else [])
-
+                x = module(x, img_size)  #训练需要计算损失函数
+                output.append(x)         #存储yolo层前向传播结果
+            layer_outputs.append(x if i in self.routs else []) #存储self.routs中对应层的输出
+            
         if self.training:
             return output
         elif ONNX_EXPORT:
@@ -280,7 +303,7 @@ def create_grids(self, img_size=416, ng=(13, 13), device='cpu', type=torch.float
     # build xy offsets
     yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
     self.grid_xy = torch.stack((xv, yv), 2).to(device).type(type).view((1, 1, ny, nx, 2))
-
+    
     # build wh gains
     self.anchor_vec = self.anchors.to(device) / self.stride
     self.anchor_wh = self.anchor_vec.view(1, self.na, 1, 1, 2).to(device).type(type)
@@ -293,7 +316,7 @@ def load_darknet_weights(self, weights, cutoff=-1):
     # Parses and loads the weights stored in 'weights'
     # cutoff: save layers between 0 and cutoff (if cutoff = -1 all are saved)
     file = Path(weights).name
-
+    
     # Try to download weights if not available locally
     msg = weights + ' missing, download from https://drive.google.com/drive/folders/1uxgUBemJVw9wZsdpboYbzUN4bcRhsuAI'
     if not os.path.isfile(weights):
@@ -396,7 +419,7 @@ def convert(cfg='cfg/yolov3-spp.cfg', weights='weights/yolov3-spp.weights'):
 
     # Initialize model
     model = Darknet(cfg)
-
+    
     # Load weights and save
     if weights.endswith('.pt'):  # if PyTorch format
         model.load_state_dict(torch.load(weights, map_location='cpu')['model'])

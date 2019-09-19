@@ -61,6 +61,7 @@ def train():
     best = wdir + 'best.pt'
     multi_scale = opt.multi_scale
 
+    # 如果是多尺度训练，那么会调整图片的尺寸在67% - 150%之间
     if multi_scale:
         img_sz_min = round(img_size / 32 / 1.5) + 1
         img_sz_max = round(img_size / 32 * 1.5) - 1
@@ -337,7 +338,7 @@ def train():
                          'model': model.module.state_dict() if type(
                              model) is nn.parallel.DistributedDataParallel else model.state_dict(),
                          'optimizer': None if final_epoch else optimizer.state_dict()}
-
+            
             # Save last checkpoint
             torch.save(chkpt, last)
             if opt.bucket and not opt.prebias:
@@ -355,7 +356,7 @@ def train():
             del chkpt
 
         # end epoch ----------------------------------------------------------------------------------------------------
-
+    
     # end training
     if len(opt.name):
         os.rename('results.txt', 'results_%s.txt' % opt.name)
@@ -395,7 +396,7 @@ if __name__ == '__main__':
     opt.weights = 'weights/last.pt' if opt.resume else opt.weights
     print(opt)
     device = torch_utils.select_device(opt.device, apex=mixed_precision)
-
+    
     tb_writer = None
     if opt.prebias:
         train()  # transfer-learn yolo biases for 1 epoch
