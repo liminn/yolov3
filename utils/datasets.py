@@ -186,11 +186,16 @@ class LoadWebcam:  # for inference
 
 
 class LoadStreams:  # multiple IP or RTSP cameras
-    def __init__(self, path='streams.txt', img_size=416, half=False):
+    def __init__(self, sources='streams.txt', img_size=416, half=False):
+        self.mode = 'images'
         self.img_size = img_size
         self.half = half  # half precision fp16 images
-        with open(path, 'r') as f:
-            sources = [x.strip() for x in f.read().splitlines() if len(x.strip())]
+
+        if os.path.isfile(sources):
+            with open(sources, 'r') as f:
+                sources = [x.strip() for x in f.read().splitlines() if len(x.strip())]
+        else:
+            sources = [sources]
 
         n = len(sources)
         self.imgs = [None] * n
@@ -208,7 +213,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
             thread.start()
 
         print('')  # newline
-        time.sleep(0.5)
+        time.sleep(0.5)  # allow connections to start
 
     def update(self, index, cap):
         # Read next stream frame in a daemon thread
@@ -308,8 +313,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         if cache_labels or image_weights:  # cache labels for faster training
             self.labels = [np.zeros((0, 5))] * n
             extract_bounding_boxes = False
+            create_datasubset = False
             pbar = tqdm(self.label_files, desc='Reading labels')
-            nm, nf, ne = 0, 0, 0  # number missing, number found, number empty
+            nm, nf, ne, ns = 0, 0, 0, 0  # number missing, number found, number empty, number datasubset
             for i, file in enumerate(pbar):
                 try:
                     with open(file, 'r') as f:
@@ -324,6 +330,18 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                     assert (l[:, 1:] <= 1).all(), 'non-normalized or out of bounds coordinate labels: %s' % file
                     self.labels[i] = l
                     nf += 1  # file found
+
+                    # Create subdataset (a smaller dataset)
+                    if create_datasubset and ns < 1E4:
+                        if ns == 0:
+                            create_folder(path='./datasubset')
+                            os.makedirs('./datasubset/images')
+                        exclude_classes = 43
+                        if exclude_classes not in l[:, 0]:
+                            ns += 1
+                            # shutil.copy(src=self.img_files[i], dst='./datasubset/images/')  # copy image
+                            with open('./datasubset/images.txt', 'a') as f:
+                                f.write(self.img_files[i] + '\n')
 
                     # Extract object detection boxes for a second stage classifier
                     if extract_bounding_boxes:
@@ -443,6 +461,10 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                                         scale=hyp['scale'],
                                         shear=hyp['shear'])
 
+            # Cutout
+            if random.random() < 0.9:
+                labels = cutout(img, labels)
+
         nL = len(labels)  # number of labels
         if nL:
             # convert xyxy to xywh
@@ -455,14 +477,14 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         if self.augment:
             # random left-right flip
             lr_flip = True
-            if lr_flip and random.random() > 0.5:
+            if lr_flip and random.random() < 0.5:
                 img = np.fliplr(img)
                 if nL:
                     labels[:, 1] = 1 - labels[:, 1]
 
             # random up-down flip
             ud_flip = False
-            if ud_flip and random.random() > 0.5:
+            if ud_flip and random.random() < 0.5:
                 img = np.flipud(img)
                 if nL:
                     labels[:, 2] = 1 - labels[:, 2]
@@ -592,6 +614,56 @@ def random_affine(img, targets=(), degrees=10, translate=.1, scale=.1, shear=10)
     return imw, targets
 
 
+def cutout(image, labels):
+    # https://arxiv.org/abs/1708.04552
+    # https://github.com/hysts/pytorch_cutout/blob/master/dataloader.py
+    # https://towardsdatascience.com/when-conventional-wisdom-fails-revisiting-data-augmentation-for-self-driving-cars-4831998c5509
+    h, w = image.shape[:2]
+
+    def bbox_ioa(box1, box2, x1y1x2y2=True):
+        # Returns the intersection over box2 area given box1, box2. box1 is 4, box2 is nx4. boxes are x1y1x2y2
+        box2 = box2.transpose()
+
+        # Get the coordinates of bounding boxes
+        # x1, y1, x2, y2 = box1
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1[0], box1[1], box1[2], box1[3]
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2[0], box2[1], box2[2], box2[3]
+
+        # Intersection area
+        inter_area = (np.minimum(b1_x2, b2_x2) - np.maximum(b1_x1, b2_x1)).clip(0) * \
+                     (np.minimum(b1_y2, b2_y2) - np.maximum(b1_y1, b2_y1)).clip(0)
+
+        # box2 area
+        box2_area = (b2_x2 - b2_x1) * (b2_y2 - b2_y1) + 1e-16
+
+        # Intersection over box2 area
+        return inter_area / box2_area
+
+    # random mask_size up to 50% image size
+    mask_h = random.randint(1, int(h * 0.5))
+    mask_w = random.randint(1, int(w * 0.5))
+
+    # box center
+    cx = random.randint(0, h)
+    cy = random.randint(0, w)
+
+    xmin = max(0, cx - mask_w // 2)
+    ymin = max(0, cy - mask_h // 2)
+    xmax = min(w, xmin + mask_w)
+    ymax = min(h, ymin + mask_h)
+
+    # apply random color mask
+    mask_color = [random.randint(0, 255) for _ in range(3)]
+    image[ymin:ymax, xmin:xmax] = mask_color
+
+    # return unobscured labels
+    if len(labels):
+        box = np.array([xmin, ymin, xmax, ymax], dtype=np.float32)
+        ioa = bbox_ioa(box, labels[:, 1:5])  # intersection over area
+        labels = labels[ioa < 0.90]  # remove >90% obscured labels
+    return labels
+
+
 def convert_images2bmp():
     # cv2.imread() jpg at 230 img/s, *.bmp at 400 img/s
     for path in ['../coco/images/val2014/', '../coco/images/train2014/']:
@@ -612,3 +684,10 @@ def convert_images2bmp():
             '/Users/glennjocher/PycharmProjects/', '../')
         with open(label_path.replace('5k', '5k_bmp'), 'w') as file:
             file.write(lines)
+
+
+def create_folder(path='./new_folder'):
+    # Create folder
+    if os.path.exists(path):
+        shutil.rmtree(path)  # delete output folder
+    os.makedirs(path)  # make new output folder
