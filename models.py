@@ -16,7 +16,7 @@ def create_modules(module_defs, img_size, arc):
     module_list = nn.ModuleList() # module_list用于存储每个block,每个block对应cfg文件中一个块，类似[convolutional]里面就对应一个卷积块
     routs = []                    # list of layers which rout to deeper layes
     yolo_index = -1
-
+    
     # 这里，我们迭代block[1:] 而不是blocks，因为blocks的第一个元素是一个net块，它不属于前向传播。
     for i, mdef in enumerate(module_defs):
         modules = nn.Sequential() # 这里每个块用nn.sequential()创建为了一个module,一个module有多个层
@@ -69,15 +69,19 @@ def create_modules(module_defs, img_size, arc):
             当层有两个值时，它会返回由其值所索引的层的特征图的连接。在我们的例子中，它是-1,61，该层输出来自前一层（-1）和第61层的特征图，它们沿着深度维度进行连接。
             """
             layers = [int(x) for x in mdef['layers'].split(',')]
+            # 记录输出的filter大小
             # 疑问：为什么是i + 1？
             filters = sum([output_filters[i + 1 if i > 0 else i] for i in layers]) # 卷积核数目为两层的加和
+            # 扩充routs列表信息
             routs.extend([l if l > 0 else l + i for l in layers])
             # if mdef[i+1]['type'] == 'reorg3d':
             #     modules = nn.Upsample(scale_factor=1/float(mdef[i+1]['stride']), mode='nearest')  # reorg3d
 
         elif mdef['type'] == 'shortcut':  # nn.Sequential() placeholder for 'shortcut' layer
+            # 记录输出的filter大小
             filters = output_filters[int(mdef['from'])]
             layer = int(mdef['from'])
+            # 扩充routs列表信息
             routs.extend([i + layer if layer < 0 else layer])
             
         elif mdef['type'] == 'reorg3d':  # yolov3-spp-pan-scale
@@ -95,6 +99,7 @@ def create_modules(module_defs, img_size, arc):
                                 arc=arc)  # yolo architecture
 
             # Initialize preceding Conv2d() bias (https://arxiv.org/pdf/1708.02002.pdf section 3.3)
+            # 疑问：未看懂这段是干什么的
             try:
                 if arc == 'defaultpw' or arc == 'Fdefaultpw':  # default with positive weights
                     b = [-4, -3.6]  # obj, cls
@@ -148,7 +153,7 @@ class YOLOLayer(nn.Module):
         self.nx = 0             # initialize number of x gridpoints
         self.ny = 0             # initialize number of y gridpoints
         self.arc = arc
-        
+
         if ONNX_EXPORT:  # grids must be computed in __init__
             stride = [32, 16, 8][yolo_index]  # stride of this layer
             nx = int(img_size[1] / stride)    # number x grid points
@@ -161,6 +166,7 @@ class YOLOLayer(nn.Module):
         else:
             bs, ny, nx = p.shape[0], p.shape[-2], p.shape[-1]
             if (self.nx, self.ny) != (nx, ny):
+                # 疑问：create_grids()的作用在哪儿？
                 create_grids(self, img_size, (nx, ny), p.device, p.dtype)
 
         # 把255的列向量信息，加一个维度分开成3个box
@@ -233,13 +239,13 @@ class Darknet(nn.Module):
 
         # Darknet Header https://github.com/AlexeyAB/darknet/issues/2914#issuecomment-496675346
         self.version = np.array([0, 2, 5], dtype=np.int32)  # (int32) version info: major, minor, revision
-        self.seen = np.array([0], dtype=np.int64)  # (int64) number of images seen during training
+        self.seen = np.array([0], dtype=np.int64)  # (int64) number of images seen during training    
 
     def forward(self, x, var=None):
         img_size = x.shape[-2:]
-        layer_outputs = []    # 存储self.routs中对应层的输出
-        output = []           # 存储YOLO层的检测输出
-
+        layer_outputs = []    # 只存储self.routs中对应层的输出
+        output = []           # 只存储YOLO层的检测输出，三个输出
+        
         for i, (mdef, module) in enumerate(zip(self.module_defs, self.module_list)):
             mtype = mdef['type']
             if mtype in ['convolutional', 'upsample', 'maxpool']:
@@ -306,6 +312,7 @@ def create_grids(self, img_size=416, ng=(13, 13), device='cpu', type=torch.float
     
     # build wh gains
     self.anchor_vec = self.anchors.to(device) / self.stride
+    # 为什么要这样reshape？
     self.anchor_wh = self.anchor_vec.view(1, self.na, 1, 1, 2).to(device).type(type)
     self.ng = torch.Tensor(ng).to(device)
     self.nx = nx

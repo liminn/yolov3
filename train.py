@@ -45,7 +45,6 @@ if f:
     for k, v in zip(hyp.keys(), np.loadtxt(f[0])):
         hyp[k] = v
 
-
 def train():
     cfg = opt.cfg
     data = opt.data
@@ -408,7 +407,7 @@ if __name__ == '__main__':
         create_backbone(last)  # saved results as backbone.pt
         opt.weights = wdir + 'backbone.pt'  # assign backbone
         opt.prebias = False  # disable prebias
-
+    
     if not opt.evolve:  # Train normally
         try:
             # Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/

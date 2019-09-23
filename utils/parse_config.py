@@ -13,8 +13,8 @@ def parse_model_cfg(path):
          {"type":"route", "layers":"-4", ...},
          {"type":"upsample", "stride":"2", ...},
          ...]
-    小结: 配置文件定义了6种不同type：{'convolutional', 'net', 'route', 'shortcut', 'upsample', 'yolo'}
-         其中，'net'相当于超参数,网络全局配置的相关参数
+    注: 配置文件定义了6种不同type：{'net', 'convolutional', 'route', 'shortcut', 'upsample', 'yolo'}
+        其中，'net'相当于超参数,网络全局配置的相关参数
     """
     # Parses the yolo-v3 layer configuration file and returns module definitions
     file = open(path, 'r')
